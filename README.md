@@ -2,9 +2,9 @@
 
 A Riemann plugin called statekeeper
 
-## Goal
+## Description
 
-Keep stream state during Riemann config reloads.
+Keep stream state during Riemann config reloads. Based on the work done in Riemann pull request [#744](https://github.com/riemann/riemann/pull/744)
 
 ## Usage
 
