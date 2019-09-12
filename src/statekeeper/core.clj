@@ -154,7 +154,6 @@
       (swap! mew-stream-state
              assoc stream-name (vec (take-last n (conj (get @mew-stream-state stream-name) event))))
       (let [events (get @mew-stream-state stream-name)]
-        (info @mew-stream-state)
         (call-rescue events children)))))
 
 ;
