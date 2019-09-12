@@ -128,3 +128,90 @@
     (fn [e]
       (.put chm [(:service e) (:host e)] e)
       (period-manager e))))
+
+;
+; moving-event-window
+;
+
+(defonce mew-stream-state (atom {}))
+
+(defn extract-moving-event-window-args
+  [args children]
+  (cond
+    (number? args) {:n args :stream-name :default :children children}
+    (map? args)    (assoc args :stream-name (keyword (get args :stream-name :default)) :children children)))
+
+(defn moving-event-window
+  "A sliding window of the last few events. Every time an event arrives, calls
+     children with a vector of the last n events, from oldest to newest. Ignores
+     event times. Examples:
+
+     (moving-event-window 5 (smap folds/mean index))
+     (moving-event-window {:n 5 :stream-name :mystream} (smap folds/mean index))"
+  [n & children]
+  (let [{:keys [n stream-name children]} (extract-moving-event-window-args n children)]
+    (fn stream [event]
+      (swap! mew-stream-state
+             assoc stream-name (vec (take-last n (conj (get @mew-stream-state stream-name) event))))
+      (let [events (get @mew-stream-state stream-name)]
+        (info @mew-stream-state)
+        (call-rescue events children)))))
+
+;
+; predict-linear
+;
+
+(defn predict-linear
+  "Stream that performs OLS regression. Uses a moving-event-window
+  of :n events and emits an event with a prediction for :metric of :s
+  seconds in the future. If the optional model rebuild interval :r
+  (in seconds) is specified the model will be rebuild periodically and
+  not on every arriving event.
+
+  E.g. predict the metric of service \"fs-usage\" 30 minutes in the
+  future grouped by host:
+
+  ```clojure
+  (where (service \"fs-usage\")
+    (by :host
+      (predict-linear {:n 10 :s 1800 :stream-name :mystream}
+        #(info %))))
+  ```
+  "
+  [args & children]
+  (assert (> (get args :n) 1))
+  (let [n (get args :n)
+        s (get args :s)
+        stream-name (get args :stream-name :default)
+        rebuild-interval (* (get args :r 0) 1000)
+        last-rebuild (atom 0)
+        coefs (atom {:intercept 0 :slope 0})]
+    (moving-event-window
+      {:n n :stream-name stream-name}
+      (smap
+        (fn [events]
+          ; Makes no sense to build model for one event
+          (when (> (count events) 1)
+            (let [model (fn [events]
+                          (let [x (map :time events)
+                                x-avg (/ (reduce + x) (count x))
+                                y (map :metric events)
+                                y-avg (/ (reduce + y) (count y))
+                                x-sub (map #(- % x-avg) x)
+                                y-sub (map #(- % y-avg) y)
+                                m (/
+                                   (reduce + (map * x-sub y-sub))
+                                   (reduce + (map * x-sub x-sub)))
+                                b (- y-avg (* m x-avg))]
+                            (reset! coefs {:slope m :intercept b})
+                            (reset! last-rebuild (System/currentTimeMillis))
+                            @coefs))
+                  params (if (or
+                               (= 0 rebuild-interval)
+                               (= 0 @last-rebuild)
+                               (> (- (System/currentTimeMillis) @last-rebuild) rebuild-interval))
+                           (model events)
+                           @coefs)]
+              (let [prediction (+ (:intercept params) (* (+ (:time (last events)) s) (:slope params)))
+                    event (assoc (last events) :metric prediction)]
+                (call-rescue event children)))))))))
